@@ -112,4 +112,6 @@ pkill -f node
 - [ ] 优化WebSocket重连机制
 - [ ] 添加历史数据持久化存储 
 
-## 
+## 打赏地址 哈哈和别人一样也写一个
+- solana 4HLYN6b3fUAQwJnvz73DknV3MCBHkmomP1WK1TMcbPZC
+- bsc 0x4443f4426bdfc6e919b5ad84ea2a49e06da52888
