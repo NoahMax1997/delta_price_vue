@@ -11,6 +11,39 @@
         </div>
       </template>
       
+      <!-- 交易所组合选择器 -->
+      <div class="exchange-selector-container" style="margin-bottom: 20px;">
+        <div class="exchange-selector-label">
+          <span style="font-weight: bold; color: #409EFF;">选择交易所组合:</span>
+        </div>
+        <el-select
+          v-model="selectedExchangePair"
+          placeholder="请选择要比较的交易所组合"
+          style="width: 300px; margin-top: 10px;"
+          @change="handleExchangePairChange"
+        >
+          <el-option
+            label="Binance ↔ OKX"
+            value="binance-okx"
+          />
+          <el-option
+            label="Binance ↔ Bitget"
+            value="binance-bitget"
+          />
+          <el-option
+            label="OKX ↔ Bitget"
+            value="okx-bitget"
+          />
+        </el-select>
+        <el-tag 
+          v-if="selectedExchangePair" 
+          type="primary" 
+          style="margin-left: 15px;"
+        >
+          当前组合: {{ getExchangePairLabel(selectedExchangePair) }}
+        </el-tag>
+      </div>
+      
       <el-select
         v-model="selectedSymbols"
         multiple
@@ -18,6 +51,7 @@
         placeholder="请选择要监控的交易对"
         style="width: 100%"
         @change="handleSymbolChange"
+        :disabled="!selectedExchangePair"
       >
         <el-option
           v-for="symbol in availableSymbols"
@@ -33,6 +67,7 @@
           @click="fetchActiveContracts"
           :loading="isFetchingContracts"
           style="margin-right: 10px;"
+          :disabled="!selectedExchangePair"
         >
           <el-icon><Refresh /></el-icon>
           获取活跃合约
@@ -41,7 +76,7 @@
         <el-button 
           type="primary" 
           @click="startMonitoring"
-          :disabled="selectedSymbols.length === 0"
+          :disabled="selectedSymbols.length === 0 || !selectedExchangePair"
           :loading="isConnecting"
         >
           <el-icon><Connection /></el-icon>
@@ -95,7 +130,7 @@
           可用交易对总数: {{ availableSymbols.length }} 个
         </el-tag>
         <el-tag type="success" style="margin-left: 10px;">
-          Binance & OKX 重合交易对
+          {{ getExchangePairLabel(selectedExchangePair) }} 重合交易对
         </el-tag>
       </div>
     </el-card>
@@ -111,7 +146,7 @@
     />
 
     <!-- 价差数据表格 -->
-    <el-card v-if="selectedSymbols.length > 0" class="data-table" shadow="hover">
+    <el-card v-if="selectedSymbols.length > 0 && selectedExchangePair" class="data-table" shadow="hover">
       <template #header>
         <div class="card-header">
           <span>实时价差监控 ({{ selectedSymbols.length }}个交易对)</span>
@@ -139,67 +174,69 @@
           </template>
         </el-table-column>
         
-        <el-table-column label="Binance" min-width="350">
+        <!-- 动态显示第一个交易所列 -->
+        <el-table-column :label="getFirstExchangeLabel()" min-width="350">
           <el-table-column label="卖一价" min-width="110">
             <template #default="{ row }">
-              <span class="price-text">{{ formatPrice(row.binance?.askPrice) }}</span>
+              <span class="price-text">{{ formatPrice(getFirstExchangeData(row)?.askPrice) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="买一价" min-width="110">
             <template #default="{ row }">
-              <span class="price-text">{{ formatPrice(row.binance?.bidPrice) }}</span>
+              <span class="price-text">{{ formatPrice(getFirstExchangeData(row)?.bidPrice) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="总价值" min-width="130">
             <template #default="{ row }">
               <div class="value-text">
-                <div>卖: {{ formatValue(row.binance?.askPrice, row.binance?.askQty) }}</div>
-                <div>买: {{ formatValue(row.binance?.bidPrice, row.binance?.bidQty) }}</div>
+                <div>卖: {{ formatValue(getFirstExchangeData(row)?.askPrice, getFirstExchangeData(row)?.askQty) }}</div>
+                <div>买: {{ formatValue(getFirstExchangeData(row)?.bidPrice, getFirstExchangeData(row)?.bidQty) }}</div>
               </div>
             </template>
           </el-table-column>
         </el-table-column>
         
-        <el-table-column label="OKX" min-width="350">
+        <!-- 动态显示第二个交易所列 -->
+        <el-table-column :label="getSecondExchangeLabel()" min-width="350">
           <el-table-column label="卖一价" min-width="110">
             <template #default="{ row }">
-              <span class="price-text">{{ formatPrice(row.okx?.askPrice) }}</span>
+              <span class="price-text">{{ formatPrice(getSecondExchangeData(row)?.askPrice) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="买一价" min-width="110">
             <template #default="{ row }">
-              <span class="price-text">{{ formatPrice(row.okx?.bidPrice) }}</span>
+              <span class="price-text">{{ formatPrice(getSecondExchangeData(row)?.bidPrice) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="总价值" min-width="130">
             <template #default="{ row }">
               <div class="value-text">
-                <div>卖: {{ formatValue(row.okx?.askPrice, row.okx?.askQty) }}</div>
-                <div>买: {{ formatValue(row.okx?.bidPrice, row.okx?.bidQty) }}</div>
+                <div>卖: {{ formatValue(getSecondExchangeData(row)?.askPrice, getSecondExchangeData(row)?.askQty) }}</div>
+                <div>买: {{ formatValue(getSecondExchangeData(row)?.bidPrice, getSecondExchangeData(row)?.bidQty) }}</div>
               </div>
             </template>
           </el-table-column>
         </el-table-column>
         
         <el-table-column label="价差率 (%)" min-width="320">
-          <el-table-column label="Binance买/OKX卖" min-width="160">
+          <el-table-column :label="`${getFirstExchangeLabel()}买/${getSecondExchangeLabel()}卖`" min-width="160">
             <template #default="{ row }">
               <el-tag 
-                :type="getSpreadType(row.spread?.buyBinanceSellOkx)"
+                :type="getSpreadType(row.spread?.buyFirstSellSecond)"
                 v-if="row.spread"
               >
-                {{ row.spread.buyBinanceSellOkx.toFixed(4) }}%
+                {{ row.spread.buyFirstSellSecond.toFixed(4) }}%
               </el-tag>
               <span v-else>-</span>
             </template>
           </el-table-column>
-          <el-table-column label="Binance卖/OKX买" min-width="160">
+          <el-table-column :label="`${getFirstExchangeLabel()}卖/${getSecondExchangeLabel()}买`" min-width="160">
             <template #default="{ row }">
               <el-tag 
-                :type="getSpreadType(row.spread?.sellBinanceBuyOkx)"
+                :type="getSpreadType(row.spread?.sellFirstBuySecond)"
                 v-if="row.spread"
               >
-                {{ row.spread.sellBinanceBuyOkx.toFixed(4) }}%
+                {{ row.spread.sellFirstBuySecond.toFixed(4) }}%
               </el-tag>
               <span v-else>-</span>
             </template>
@@ -207,34 +244,34 @@
         </el-table-column>
 
         <el-table-column label="Funding Rate (%)" min-width="320">
-          <el-table-column label="Binance" min-width="160">
+          <el-table-column :label="getFirstExchangeLabel()" min-width="160">
             <template #default="{ row }">
               <div class="funding-rate-cell">
                 <el-tag 
-                  :type="getFundingRateType(fundingRates[row.symbol]?.binance?.fundingRate)"
-                  v-if="fundingRates[row.symbol]?.binance"
+                  :type="getFundingRateType(getFirstExchangeFundingRate(row.symbol))"
+                  v-if="getFirstExchangeFundingRate(row.symbol)"
                 >
-                  {{ formatFundingRate(fundingRates[row.symbol].binance.fundingRate) }}
+                  {{ formatFundingRate(getFirstExchangeFundingRate(row.symbol)) }}
                 </el-tag>
                 <span v-else class="loading-text">获取中...</span>
-                <div class="funding-time" v-if="fundingRates[row.symbol]?.binance">
-                  {{ formatNextFundingTime(fundingRates[row.symbol].binance.nextFundingTime) }}
+                <div class="funding-time" v-if="getFirstExchangeFundingTime(row.symbol)">
+                  {{ formatNextFundingTime(getFirstExchangeFundingTime(row.symbol)) }}
                 </div>
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="OKX" min-width="160">
+          <el-table-column :label="getSecondExchangeLabel()" min-width="160">
             <template #default="{ row }">
               <div class="funding-rate-cell">
                 <el-tag 
-                  :type="getFundingRateType(fundingRates[row.symbol]?.okx?.fundingRate)"
-                  v-if="fundingRates[row.symbol]?.okx"
+                  :type="getFundingRateType(getSecondExchangeFundingRate(row.symbol))"
+                  v-if="getSecondExchangeFundingRate(row.symbol)"
                 >
-                  {{ formatFundingRate(fundingRates[row.symbol].okx.fundingRate) }}
+                  {{ formatFundingRate(getSecondExchangeFundingRate(row.symbol)) }}
                 </el-tag>
                 <span v-else class="loading-text">获取中...</span>
-                <div class="funding-time" v-if="fundingRates[row.symbol]?.okx">
-                  {{ formatNextFundingTime(fundingRates[row.symbol].okx.nextFundingTime) }}
+                <div class="funding-time" v-if="getSecondExchangeFundingTime(row.symbol)">
+                  {{ formatNextFundingTime(getSecondExchangeFundingTime(row.symbol)) }}
                 </div>
               </div>
             </template>
@@ -245,10 +282,10 @@
           <template #default="{ row }">
             <el-text 
               v-if="row.spread"
-              :type="row.spread.buyBinanceSellOkx > 0.15 || row.spread.sellBinanceBuyOkx > 0.15 ? 'success' : 'info'"
+              :type="row.spread.buyFirstSellSecond > 0.15 || row.spread.sellFirstBuySecond > 0.15 ? 'success' : 'info'"
               size="small"
             >
-              {{ getArbitrageAdvice(row.spread.buyBinanceSellOkx, row.spread.sellBinanceBuyOkx) }}
+              {{ getArbitrageAdvice(row.spread.buyFirstSellSecond, row.spread.sellFirstBuySecond) }}
             </el-text>
             <span v-else>-</span>
           </template>
@@ -273,8 +310,8 @@
 
     <!-- 空状态 -->
     <el-empty 
-      v-if="selectedSymbols.length === 0" 
-      description="请选择要监控的交易对"
+      v-if="selectedSymbols.length === 0 || !selectedExchangePair" 
+      :description="!selectedExchangePair ? '请先选择交易所组合' : '请选择要监控的交易对'"
       class="empty-state"
     />
 
@@ -306,12 +343,12 @@
             <h4>实时数据</h4>
             <div v-for="symbol in selectedSymbols" :key="symbol" class="symbol-status">
               <strong>{{ symbol }}:</strong>
-              <div class="data-status">
-                <span :class="priceData[`binance_${symbol}`] ? 'connected' : 'disconnected'">
-                  Binance: {{ priceData[`binance_${symbol}`] ? '✓' : '✗' }}
+              <div class="data-status" v-if="selectedExchangePair">
+                <span :class="getFirstExchangeConnectionStatus(symbol) ? 'connected' : 'disconnected'">
+                  {{ getFirstExchangeLabel() }}: {{ getFirstExchangeConnectionStatus(symbol) ? '✓' : '✗' }}
                 </span>
-                <span :class="priceData[`okx_${symbol}`] ? 'connected' : 'disconnected'">
-                  OKX: {{ priceData[`okx_${symbol}`] ? '✓' : '✗' }}
+                <span :class="getSecondExchangeConnectionStatus(symbol) ? 'connected' : 'disconnected'">
+                  {{ getSecondExchangeLabel() }}: {{ getSecondExchangeConnectionStatus(symbol) ? '✓' : '✗' }}
                 </span>
               </div>
             </div>
@@ -321,8 +358,8 @@
         <el-col :span="6">
           <div class="status-item">
             <h4>队列统计</h4>
-            <p>Binance队列: <span class="stat-number">{{ matchStats.totalBinanceQueue }}</span> 个</p>
-            <p>OKX队列: <span class="stat-number">{{ matchStats.totalOKXQueue }}</span> 个</p>
+            <p v-if="selectedExchangePair">{{ getFirstExchangeLabel() }}队列: <span class="stat-number">{{ getFirstExchangeQueueCount() }}</span> 个</p>
+            <p v-if="selectedExchangePair">{{ getSecondExchangeLabel() }}队列: <span class="stat-number">{{ getSecondExchangeQueueCount() }}</span> 个</p>
             <p>成功匹配: <span class="stat-number success">{{ matchStats.successfulMatches }}</span> 次</p>
             <p>丢弃匹配: <span class="stat-number warning">{{ matchStats.discardedMatches }}</span> 次</p>
             <p>匹配成功率: <span class="stat-number">{{ getMatchSuccessRate() }}%</span></p>
@@ -382,22 +419,22 @@
     >
       <div class="detail-content" v-if="selectedDetailSymbol">
         <!-- 实时价差卡片 -->
-        <el-row :gutter="20" style="margin-bottom: 20px;">
+        <el-row :gutter="20" style="margin-bottom: 20px;" v-if="selectedExchangePair">
           <el-col :span="12">
             <el-card shadow="hover">
               <template #header>
                 <div class="card-header">
-                  <span>Binance买/OKX卖</span>
+                  <span>{{ getFirstExchangeLabel() }}买/{{ getSecondExchangeLabel() }}卖</span>
                 </div>
               </template>
               <div class="spread-display">
                 <span 
                   class="spread-value" 
-                  :class="getSpreadClass(getCurrentSpread(selectedDetailSymbol)?.buyBinanceSellOkx)"
+                  :class="getSpreadClass(getCurrentSpread(selectedDetailSymbol)?.buyFirstSellSecond || getCurrentSpread(selectedDetailSymbol)?.buyBinanceSellOkx)"
                 >
-                  {{ getCurrentSpread(selectedDetailSymbol)?.buyBinanceSellOkx?.toFixed(4) || '-' }}%
+                  {{ (getCurrentSpread(selectedDetailSymbol)?.buyFirstSellSecond || getCurrentSpread(selectedDetailSymbol)?.buyBinanceSellOkx)?.toFixed(4) || '-' }}%
                 </span>
-                <div class="spread-desc">买入Binance，卖出OKX</div>
+                <div class="spread-desc">买入{{ getFirstExchangeLabel() }}，卖出{{ getSecondExchangeLabel() }}</div>
               </div>
             </el-card>
           </el-col>
@@ -406,36 +443,36 @@
             <el-card shadow="hover">
               <template #header>
                 <div class="card-header">
-                  <span>Binance卖/OKX买</span>
+                  <span>{{ getFirstExchangeLabel() }}卖/{{ getSecondExchangeLabel() }}买</span>
                 </div>
               </template>
               <div class="spread-display">
                 <span 
                   class="spread-value" 
-                  :class="getSpreadClass(getCurrentSpread(selectedDetailSymbol)?.sellBinanceBuyOkx)"
+                  :class="getSpreadClass(getCurrentSpread(selectedDetailSymbol)?.sellFirstBuySecond || getCurrentSpread(selectedDetailSymbol)?.sellBinanceBuyOkx)"
                 >
-                  {{ getCurrentSpread(selectedDetailSymbol)?.sellBinanceBuyOkx?.toFixed(4) || '-' }}%
+                  {{ (getCurrentSpread(selectedDetailSymbol)?.sellFirstBuySecond || getCurrentSpread(selectedDetailSymbol)?.sellBinanceBuyOkx)?.toFixed(4) || '-' }}%
                 </span>
-                <div class="spread-desc">卖出Binance，买入OKX</div>
+                <div class="spread-desc">卖出{{ getFirstExchangeLabel() }}，买入{{ getSecondExchangeLabel() }}</div>
               </div>
             </el-card>
           </el-col>
         </el-row>
 
         <!-- 价格信息 -->
-        <el-row :gutter="20" style="margin-bottom: 20px;">
+        <el-row :gutter="20" style="margin-bottom: 20px;" v-if="selectedExchangePair">
           <el-col :span="12">
             <el-card shadow="hover">
               <template #header>
                 <div class="card-header">
-                  <span>Binance 价格</span>
+                  <span>{{ getFirstExchangeLabel() }} 价格</span>
                 </div>
               </template>
               <div class="price-info">
-                <p>卖一价: {{ formatPrice(priceData[`binance_${selectedDetailSymbol}`]?.askPrice) }}</p>
-                <p>买一价: {{ formatPrice(priceData[`binance_${selectedDetailSymbol}`]?.bidPrice) }}</p>
-                <p>卖一量: {{ priceData[`binance_${selectedDetailSymbol}`]?.askQty || '-' }}</p>
-                <p>买一量: {{ priceData[`binance_${selectedDetailSymbol}`]?.bidQty || '-' }}</p>
+                <p>卖一价: {{ formatPrice(getFirstExchangeDetailData()?.askPrice) }}</p>
+                <p>买一价: {{ formatPrice(getFirstExchangeDetailData()?.bidPrice) }}</p>
+                <p>卖一量: {{ getFirstExchangeDetailData()?.askQty || '-' }}</p>
+                <p>买一量: {{ getFirstExchangeDetailData()?.bidQty || '-' }}</p>
               </div>
             </el-card>
           </el-col>
@@ -444,14 +481,14 @@
             <el-card shadow="hover">
               <template #header>
                 <div class="card-header">
-                  <span>OKX 价格</span>
+                  <span>{{ getSecondExchangeLabel() }} 价格</span>
                 </div>
               </template>
               <div class="price-info">
-                <p>卖一价: {{ formatPrice(priceData[`okx_${selectedDetailSymbol}`]?.askPrice) }}</p>
-                <p>买一价: {{ formatPrice(priceData[`okx_${selectedDetailSymbol}`]?.bidPrice) }}</p>
-                <p>卖一量: {{ priceData[`okx_${selectedDetailSymbol}`]?.askQty || '-' }}</p>
-                <p>买一量: {{ priceData[`okx_${selectedDetailSymbol}`]?.bidQty || '-' }}</p>
+                <p>卖一价: {{ formatPrice(getSecondExchangeDetailData()?.askPrice) }}</p>
+                <p>买一价: {{ formatPrice(getSecondExchangeDetailData()?.bidPrice) }}</p>
+                <p>卖一量: {{ getSecondExchangeDetailData()?.askQty || '-' }}</p>
+                <p>买一量: {{ getSecondExchangeDetailData()?.bidQty || '-' }}</p>
               </div>
             </el-card>
           </el-col>
@@ -471,15 +508,15 @@
                 <div class="stat-value">{{ getTickHistory(selectedDetailSymbol).length }}</div>
               </div>
             </el-col>
-            <el-col :span="4">
+            <el-col :span="4" v-if="selectedExchangePair">
               <div class="stat-item">
-                <div class="stat-label">Binance买/OKX卖最大</div>
+                <div class="stat-label">{{ getFirstExchangeLabel() }}买/{{ getSecondExchangeLabel() }}卖最大</div>
                 <div class="stat-value positive">{{ formatSpreadValue(priceStore.getRealtimeMaxPositiveSpread(selectedDetailSymbol)) }}%</div>
               </div>
             </el-col>
-            <el-col :span="4">
+            <el-col :span="4" v-if="selectedExchangePair">
               <div class="stat-item">
-                <div class="stat-label">Binance卖/OKX买最大</div>
+                <div class="stat-label">{{ getFirstExchangeLabel() }}卖/{{ getSecondExchangeLabel() }}买最大</div>
                 <div class="stat-value positive">{{ formatSpreadValue(priceStore.getRealtimeMaxSellBinanceBuyOkx(selectedDetailSymbol)) }}%</div>
               </div>
             </el-col>            <el-col :span="4">
@@ -566,18 +603,18 @@
           
           <el-table-column label="队列状态" min-width="180">
             <template #default="{ row }">
-              <div class="queue-status">
-                <div>Binance: <span class="stat-number">{{ symbolQueues[row]?.binance?.length || 0 }}</span></div>
-                <div>OKX: <span class="stat-number">{{ symbolQueues[row]?.okx?.length || 0 }}</span></div>
+              <div class="queue-status" v-if="selectedExchangePair">
+                <div>{{ getFirstExchangeLabel() }}: <span class="stat-number">{{ getSymbolQueueLength(row, 'first') }}</span></div>
+                <div>{{ getSecondExchangeLabel() }}: <span class="stat-number">{{ getSymbolQueueLength(row, 'second') }}</span></div>
               </div>
             </template>
           </el-table-column>
           
           <el-table-column label="数据接收统计" min-width="200">
             <template #default="{ row }">
-              <div class="receive-stats">
-                <div>Binance: <span class="stat-number">{{ symbolQueues[row]?.stats?.totalBinanceDataReceived || 0 }}</span></div>
-                <div>OKX: <span class="stat-number">{{ symbolQueues[row]?.stats?.totalOKXDataReceived || 0 }}</span></div>
+              <div class="receive-stats" v-if="selectedExchangePair">
+                <div>{{ getFirstExchangeLabel() }}: <span class="stat-number">{{ getSymbolDataReceived(row, 'first') }}</span></div>
+                <div>{{ getSecondExchangeLabel() }}: <span class="stat-number">{{ getSymbolDataReceived(row, 'second') }}</span></div>
               </div>
             </template>
           </el-table-column>
@@ -696,6 +733,9 @@ const chartOption = ref({})
 const chartKey = ref(0)
 let updateChartTimer = null
 
+// 交易所组合选择
+const selectedExchangePair = ref('binance-okx') // 默认选择binance-okx
+
 // 套利机会提示防抖 - 记录每个交易对最后一次提示时间
 const arbitrageNotificationTimes = ref({})
 const ARBITRAGE_NOTIFICATION_INTERVAL = 10000 // 10秒间隔
@@ -711,6 +751,9 @@ const {
   fundingRates
 } = storeToRefs(priceStore)
 
+// 获取store中的selectedExchangePair状态
+const { selectedExchangePair: storeSelectedExchangePair } = storeToRefs(priceStore)
+
 // 从store获取方法
 const {
   setSelectedSymbols,
@@ -718,6 +761,15 @@ const {
   disconnectWebSockets,
   addTestData
 } = priceStore
+
+// 同步本地状态与store状态
+watch(selectedExchangePair, (newValue) => {
+  storeSelectedExchangePair.value = newValue
+}, { immediate: true })
+
+watch(storeSelectedExchangePair, (newValue) => {
+  selectedExchangePair.value = newValue
+}, { immediate: true })
 
 // 直接使用store的computed
 const formattedData = computed(() => {
@@ -735,8 +787,8 @@ watch(formattedData, (newData) => {
   // 检查是否有大价差机会
   newData.forEach(item => {
     if (item.spread) {
-      const { buyBinanceSellOkx, sellBinanceBuyOkx } = item.spread
-      if (buyBinanceSellOkx > 0.15 || sellBinanceBuyOkx > 0.15) {
+      const { buyFirstSellSecond, sellFirstBuySecond } = item.spread
+      if (buyFirstSellSecond > 0.15 || sellFirstBuySecond > 0.15) {
         const currentTime = Date.now()
         const lastNotificationTime = arbitrageNotificationTimes.value[item.symbol] || 0
         
@@ -745,18 +797,21 @@ watch(formattedData, (newData) => {
           // 更新最后提示时间
           arbitrageNotificationTimes.value[item.symbol] = currentTime
           
+          const firstLabel = getFirstExchangeLabel()
+          const secondLabel = getSecondExchangeLabel()
+          
           // 发现大于0.15%的套利机会
           ElMessage({
-            message: `发现套利机会！${item.symbol} 价差: ${Math.max(buyBinanceSellOkx, sellBinanceBuyOkx).toFixed(4)}%`,
+            message: `发现套利机会！${item.symbol} (${firstLabel}-${secondLabel}) 价差: ${Math.max(buyFirstSellSecond, sellFirstBuySecond).toFixed(4)}%`,
             type: 'success',
             duration: 5000
           })
           
-          console.log(`套利机会提示: ${item.symbol}, 价差: ${Math.max(buyBinanceSellOkx, sellBinanceBuyOkx).toFixed(4)}%, 时间: ${new Date().toLocaleTimeString()}`)
+          console.log(`套利机会提示: ${item.symbol}, 价差: ${Math.max(buyFirstSellSecond, sellFirstBuySecond).toFixed(4)}%, 时间: ${new Date().toLocaleTimeString()}`)
         } else {
           // 在防抖期间，只在控制台记录，不显示提示
           const remainingTime = Math.ceil((ARBITRAGE_NOTIFICATION_INTERVAL - (currentTime - lastNotificationTime)) / 1000)
-          console.log(`套利机会检测到但被防抖: ${item.symbol}, 价差: ${Math.max(buyBinanceSellOkx, sellBinanceBuyOkx).toFixed(4)}%, 还需等待: ${remainingTime}秒`)
+          console.log(`套利机会检测到但被防抖: ${item.symbol}, 价差: ${Math.max(buyFirstSellSecond, sellFirstBuySecond).toFixed(4)}%, 还需等待: ${remainingTime}秒`)
         }
       }
     }
@@ -768,30 +823,248 @@ const handleSymbolChange = (symbols) => {
   selectedSymbols.value = symbols
 }
 
+// 处理交易所组合选择变化
+const handleExchangePairChange = async (pairValue) => {
+  // 使用priceStore的setSelectedExchangePair方法进行切换
+  priceStore.setSelectedExchangePair(pairValue)
+  ElMessage.info(`已切换到 ${getExchangePairLabel(pairValue)} 组合，正在自动获取合约...`)
+  
+  // 自动触发获取合约函数
+  try {
+    await fetchActiveContracts()
+  } catch (error) {
+    console.error('自动获取合约失败:', error)
+    ElMessage.error('自动获取合约失败，请手动点击"获取活跃合约"按钮重试')
+  }
+}
+
+// 获取交易所组合标签
+const getExchangePairLabel = (pairValue) => {
+  const labelMap = {
+    'binance-okx': 'Binance ↔ OKX',
+    'binance-bitget': 'Binance ↔ Bitget',
+    'okx-bitget': 'OKX ↔ Bitget'
+  }
+  return labelMap[pairValue] || ''
+}
+
+// 获取第一个交易所标签
+const getFirstExchangeLabel = () => {
+  if (!selectedExchangePair.value) return ''
+  const [first] = selectedExchangePair.value.split('-')
+  return first.charAt(0).toUpperCase() + first.slice(1)
+}
+
+// 获取第二个交易所标签
+const getSecondExchangeLabel = () => {
+  if (!selectedExchangePair.value) return ''
+  const [, second] = selectedExchangePair.value.split('-')
+  return second.charAt(0).toUpperCase() + second.slice(1)
+}
+
+// 获取第一个交易所的数据
+const getFirstExchangeData = (row) => {
+  if (!selectedExchangePair.value) return null
+  const [first] = selectedExchangePair.value.split('-')
+  return row[first]
+}
+
+// 获取第二个交易所的数据
+const getSecondExchangeData = (row) => {
+  if (!selectedExchangePair.value) return null
+  const [, second] = selectedExchangePair.value.split('-')
+  return row[second]
+}
+
+// 获取第一个交易所的资金费率
+const getFirstExchangeFundingRate = (symbol) => {
+  if (!selectedExchangePair.value || !fundingRates.value[symbol]) return null
+  const [first] = selectedExchangePair.value.split('-')
+  return fundingRates.value[symbol][first]?.fundingRate
+}
+
+// 获取第二个交易所的资金费率
+const getSecondExchangeFundingRate = (symbol) => {
+  if (!selectedExchangePair.value || !fundingRates.value[symbol]) return null
+  const [, second] = selectedExchangePair.value.split('-')
+  return fundingRates.value[symbol][second]?.fundingRate
+}
+
+// 获取第一个交易所的下次资金费率时间
+const getFirstExchangeFundingTime = (symbol) => {
+  if (!selectedExchangePair.value || !fundingRates.value[symbol]) return null
+  const [first] = selectedExchangePair.value.split('-')
+  return fundingRates.value[symbol][first]?.nextFundingTime
+}
+
+// 获取第二个交易所的下次资金费率时间
+const getSecondExchangeFundingTime = (symbol) => {
+  if (!selectedExchangePair.value || !fundingRates.value[symbol]) return null
+  const [, second] = selectedExchangePair.value.split('-')
+  return fundingRates.value[symbol][second]?.nextFundingTime
+}
+
+// 获取第一个交易所的连接状态
+const getFirstExchangeConnectionStatus = (symbol) => {
+  if (!selectedExchangePair.value) return false
+  const [first] = selectedExchangePair.value.split('-')
+  return !!priceData.value[`${first}_${symbol}`]
+}
+
+// 获取第二个交易所的连接状态
+const getSecondExchangeConnectionStatus = (symbol) => {
+  if (!selectedExchangePair.value) return false
+  const [, second] = selectedExchangePair.value.split('-')
+  return !!priceData.value[`${second}_${symbol}`]
+}
+
+// 获取第一个交易所的队列统计
+const getFirstExchangeQueueCount = () => {
+  if (!selectedExchangePair.value) return 0
+  const [first] = selectedExchangePair.value.split('-')
+  if (first === 'binance') return matchStats.value.totalBinanceQueue || 0
+  if (first === 'okx') return matchStats.value.totalOKXQueue || 0
+  if (first === 'bitget') return matchStats.value.totalBitgetQueue || 0
+  return 0
+}
+
+// 获取第二个交易所的队列统计
+const getSecondExchangeQueueCount = () => {
+  if (!selectedExchangePair.value) return 0
+  const [, second] = selectedExchangePair.value.split('-')
+  if (second === 'binance') return matchStats.value.totalBinanceQueue || 0
+  if (second === 'okx') return matchStats.value.totalOKXQueue || 0
+  if (second === 'bitget') return matchStats.value.totalBitgetQueue || 0
+  return 0
+}
+
+// 获取第一个交易所的详情数据
+const getFirstExchangeDetailData = () => {
+  if (!selectedExchangePair.value || !selectedDetailSymbol.value) return null
+  const [first] = selectedExchangePair.value.split('-')
+  return priceData.value[`${first}_${selectedDetailSymbol.value}`]
+}
+
+// 获取第二个交易所的详情数据
+const getSecondExchangeDetailData = () => {
+  if (!selectedExchangePair.value || !selectedDetailSymbol.value) return null
+  const [, second] = selectedExchangePair.value.split('-')
+  return priceData.value[`${second}_${selectedDetailSymbol.value}`]
+}
+
+// 获取指定交易对的队列长度
+const getSymbolQueueLength = (symbol, position) => {
+  if (!selectedExchangePair.value || !symbolQueues.value[symbol]) return 0
+  const [first, second] = selectedExchangePair.value.split('-')
+  const exchange = position === 'first' ? first : second
+  return symbolQueues.value[symbol][exchange]?.length || 0
+}
+
+// 获取指定交易对的数据接收统计
+const getSymbolDataReceived = (symbol, position) => {
+  if (!selectedExchangePair.value || !symbolQueues.value[symbol]?.stats) return 0
+  const [first, second] = selectedExchangePair.value.split('-')
+  const exchange = position === 'first' ? first : second
+  
+  const fieldMapping = {
+    'binance': 'totalBinanceDataReceived',
+    'okx': 'totalOKXDataReceived',
+    'bitget': 'totalBitgetDataReceived'
+  }
+  
+  const field = fieldMapping[exchange]
+  return symbolQueues.value[symbol].stats[field] || 0
+}
+
+// 开始监控
+const startMonitoring = async () => {
+  if (selectedSymbols.value.length === 0) {
+    ElMessage.warning('请先选择要监控的交易对')
+    return
+  }
+  
+  if (!selectedExchangePair.value) {
+    ElMessage.warning('请先选择交易所组合')
+    return
+  }
+  
+  isConnecting.value = true
+  try {
+    await setSelectedSymbols(selectedSymbols.value)
+    ElMessage.success('开始监控成功')
+  } catch (error) {
+    console.error('监控启动失败:', error)
+    ElMessage.error(`监控启动失败: ${error.message}`)
+  } finally {
+    isConnecting.value = false
+  }
+}
+
+// 停止监控
+const stopMonitoring = () => {
+  disconnectWebSockets()
+  ElMessage.info('已停止监控')
+}
+
+// 刷新连接
+const refreshConnections = async () => {
+  if (selectedSymbols.value.length === 0) {
+    ElMessage.warning('请先选择要监控的交易对')
+    return
+  }
+  
+  isConnecting.value = true
+  try {
+    await disconnectWebSockets()
+    await connectWebSockets()
+    ElMessage.success('连接刷新成功')
+  } catch (error) {
+    console.error('连接刷新失败:', error)
+    ElMessage.error(`连接刷新失败: ${error.message}`)
+  } finally {
+    isConnecting.value = false
+  }
+}
+
 // 获取活跃合约
 const fetchActiveContracts = async () => {
+  if (!selectedExchangePair.value) {
+    ElMessage.warning('请先选择交易所组合')
+    return
+  }
+  
+  const [firstExchange, secondExchange] = selectedExchangePair.value.split('-')
+  const firstLabel = getFirstExchangeLabel()
+  const secondLabel = getSecondExchangeLabel()
+  
   isFetchingContracts.value = true
   try {
-    ElMessage.info('正在获取Binance和OKX的活跃USDT本位合约...')
+    ElMessage.info(`正在获取${firstLabel}和${secondLabel}的活跃USDT本位合约...`)
     
-    // 并行获取两个交易所的合约信息
-    const [binanceContracts, okxContracts] = await Promise.all([
-      fetchBinanceActiveContracts(),
-      fetchOKXActiveContracts()
+    // 根据选择的交易所组合，并行获取对应的合约信息
+    const contractFetchers = {
+      'binance': fetchBinanceActiveContracts,
+      'okx': fetchOKXActiveContracts,
+      'bitget': fetchBitgetActiveContracts // 需要实现这个方法
+    }
+    
+    const [firstContracts, secondContracts] = await Promise.all([
+      contractFetchers[firstExchange](),
+      contractFetchers[secondExchange]()
     ])
     
-    console.log(`获取到Binance合约: ${binanceContracts.length}个`)
-    console.log(`获取到OKX合约: ${okxContracts.length}个`)
+    console.log(`获取到${firstLabel}合约: ${firstContracts.length}个`)
+    console.log(`获取到${secondLabel}合约: ${secondContracts.length}个`)
     
     // 找出重叠的交易对
-    const overlappingSymbols = findOverlappingSymbols(binanceContracts, okxContracts)
+    const overlappingSymbols = findOverlappingSymbols(firstContracts, secondContracts)
     
     console.log(`找到重叠交易对: ${overlappingSymbols.length}个`, overlappingSymbols)
     
     // 更新可用交易对列表
     priceStore.setAvailableSymbols(overlappingSymbols)
     
-    ElMessage.success(`成功获取活跃合约！Binance: ${binanceContracts.length}个，OKX: ${okxContracts.length}个，重合交易对: ${overlappingSymbols.length}个`)
+    ElMessage.success(`成功获取活跃合约！${firstLabel}: ${firstContracts.length}个，${secondLabel}: ${secondContracts.length}个，重合交易对: ${overlappingSymbols.length}个`)
     
   } catch (error) {
     console.error('获取活跃合约失败:', error)
@@ -852,31 +1125,55 @@ const fetchOKXActiveContracts = async () => {
     
     console.log(`OKX USDT本位永续合约数量: ${usdtContracts.length}`)
     
-    // 创建合约大小映射
-    const contractSizesMap = {}
-
-    // 转换为统一格式并收集合约大小信息
-    const symbols = usdtContracts.map(instrument => {
-      // OKX格式: BTC-USDT-SWAP -> BTC/USDT:USDT
-      const parts = instrument.instId.split('-')
-      if (parts.length >= 2) {
-        const symbol = `${parts[0]}/USDT:USDT`
-        // 记录合约大小 (ctVal字段)
-        contractSizesMap[symbol] = parseFloat(instrument.ctVal) || 1
-        console.log(`${symbol} 合约大小: ${contractSizesMap[symbol]}`)
-        return symbol
-      }
-      return null
-    }).filter(symbol => symbol !== null)
-
-    // 存储合约大小信息到store
-    priceStore.setContractSizes(contractSizesMap)
-
-    return symbols
+    // 转换为统一格式 (base/quote:settle)
+    return usdtContracts.map(instrument => {
+      const [base, settle] = instrument.instId.split('-')
+      return `${base}/USDT:USDT`
+    })
     
   } catch (error) {
     console.error('获取OKX合约失败:', error)
     throw error
+  }
+}
+
+// 获取Bitget活跃USDT本位合约
+const fetchBitgetActiveContracts = async () => {
+  try {
+    // 注意：这是一个示例URL，实际的Bitget API端点可能不同
+    // 您需要根据Bitget的实际API文档来调整这个URL
+    const response = await fetch('https://api.bitget.com/api/mix/v1/market/contracts?productType=umcbl')
+    if (!response.ok) {
+      throw new Error(`Bitget API错误: ${response.status}`)
+    }
+    
+    const data = await response.json()
+    if (data.code !== '00000') {
+      throw new Error(`Bitget API错误: ${data.msg}`)
+    }
+    // 过滤USDT本位永续合约
+    const usdtContracts = data.data.filter(instrument => 
+      instrument.quoteCoin === 'USDT' &&
+      instrument.supportMarginCoins.includes('USDT') &&
+      instrument.symbolStatus === 'normal'
+    )
+    
+    console.log(`Bitget USDT本位永续合约数量: ${usdtContracts.length}`)
+    // 转换为统一格式 (base/quote:settle)
+    return usdtContracts.map(instrument => {
+      const base = instrument.baseCoin
+      return `${base}/USDT:USDT`
+    })
+    
+  } catch (error) {
+    console.error('获取Bitget合约失败:', error)
+    // 如果Bitget API失败，返回一个默认的合约列表
+    console.warn('Bitget API访问失败，使用默认合约列表')
+    return [
+      'BTC/USDT:USDT', 'ETH/USDT:USDT', 'BNB/USDT:USDT', 'ADA/USDT:USDT', 'XRP/USDT:USDT',
+      'SOL/USDT:USDT', 'DOT/USDT:USDT', 'DOGE/USDT:USDT', 'AVAX/USDT:USDT', 'MATIC/USDT:USDT',
+      'LTC/USDT:USDT', 'LINK/USDT:USDT', 'UNI/USDT:USDT', 'ATOM/USDT:USDT'
+    ]
   }
 }
 
@@ -893,36 +1190,9 @@ const findOverlappingSymbols = (binanceSymbols, okxSymbols) => {
   return [...main, ...others]
 }
 
-// 开始监控
-const startMonitoring = async () => {
-  if (selectedSymbols.value.length === 0) {
-    ElMessage.warning('请先选择要监控的交易对')
-    return
-  }
-  
-  console.log('开始监控，选中的交易对:', selectedSymbols.value)
-  
-  isConnecting.value = true
-  try {
-    // 异步连接WebSocket
-    await setSelectedSymbols(selectedSymbols.value)
-    ElMessage.success('WebSocket连接成功，开始监控价差数据')
-    console.log('监控启动成功，WebSocket连接已建立')
-  } catch (error) {
-    ElMessage.error(`连接失败: ${error.message}`)
-    console.error('连接错误:', error)
-  } finally {
-    isConnecting.value = false
-  }
-}
 
-// 停止监控
-const stopMonitoring = () => {
-  disconnectWebSockets()
-  // 清空套利机会提示防抖记录
-  arbitrageNotificationTimes.value = {}
-  ElMessage.info('已停止监控')
-}
+
+
 
 // 测试数据
 const testData = () => {
@@ -1020,33 +1290,7 @@ const clearArbitrageNotifications = () => {
   console.log('套利机会提示防抖记录已清空')
 }
 
-// 重新连接
-const refreshConnections = async () => {
-  if (selectedSymbols.value.length === 0) {
-    ElMessage.warning('请先选择要监控的交易对')
-    return
-  }
-  
-  ElMessage.info('正在重新连接...')
-  isConnecting.value = true
-  
-  try {
-    // 先断开现有连接
-    disconnectWebSockets()
-    
-    // 等待一秒后重新连接
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    
-    // 重新连接
-    await setSelectedSymbols(selectedSymbols.value)
-    ElMessage.success('重新连接成功')
-  } catch (error) {
-    ElMessage.error(`重新连接失败: ${error.message}`)
-    console.error('重新连接错误:', error)
-  } finally {
-    isConnecting.value = false
-  }
-}
+
 
 // 格式化价格显示
 const formatPrice = (price) => {
@@ -1082,12 +1326,15 @@ const getSpreadType = (spread) => {
 }
 
 // 获取套利建议
-const getArbitrageAdvice = (buyBinanceSellOkx, sellBinanceBuyOkx) => {
-  if (buyBinanceSellOkx > 0.15) {
-    return '建议: Binance买入 → OKX卖出'
+const getArbitrageAdvice = (buyFirstSellSecond, sellFirstBuySecond) => {
+  const firstLabel = getFirstExchangeLabel()
+  const secondLabel = getSecondExchangeLabel()
+  
+  if (buyFirstSellSecond > 0.15) {
+    return `建议: ${firstLabel}买入 → ${secondLabel}卖出`
   }
-  if (sellBinanceBuyOkx > 0.15) {
-    return '建议: OKX买入 → Binance卖出'
+  if (sellFirstBuySecond > 0.15) {
+    return `建议: ${secondLabel}买入 → ${firstLabel}卖出`
   }
   return '价差较小，暂无套利机会'
 }
@@ -1096,7 +1343,7 @@ const getArbitrageAdvice = (buyBinanceSellOkx, sellBinanceBuyOkx) => {
 const getArbitrageOpportunities = () => {
   return formattedData.value.filter(item => {
     if (!item.spread) return false
-    return item.spread.buyBinanceSellOkx > 0.15 || item.spread.sellBinanceBuyOkx > 0.15
+    return item.spread.buyFirstSellSecond > 0.15 || item.spread.sellFirstBuySecond > 0.15
   }).length
 }
 
@@ -1162,11 +1409,16 @@ const getAverageSpread = (symbol) => {
   
   try {
     const validSpreads = history.map(item => {
-      if (!item || typeof item.buyBinanceSellOkx !== 'number' || typeof item.sellBinanceBuyOkx !== 'number') {
+      if (!item) return null
+      
+      // 兼容新旧格式
+      const buySpread = item.buyFirstSellSecond || item.buyBinanceSellOkx || 0
+      const sellSpread = item.sellFirstBuySecond || item.sellBinanceBuyOkx || 0
+      
+      if (typeof buySpread !== 'number' || typeof sellSpread !== 'number') {
         return null
       }
-      const buySpread = item.buyBinanceSellOkx || 0
-      const sellSpread = item.sellBinanceBuyOkx || 0
+      
       const avgSpread = (buySpread + sellSpread) / 2
       return isNaN(avgSpread) || !isFinite(avgSpread) ? null : avgSpread
     }).filter(spread => spread !== null)
@@ -1214,15 +1466,19 @@ const updateChartOption = (symbol) => {
   
   // 显示全部数据，但如果数据点太多就进行采样
   let allData = history.filter(item => {
+    if (!item || !item.timestamp) return false
+    
+    // 兼容新旧格式
+    const buySpread = item.buyFirstSellSecond || item.buyBinanceSellOkx
+    const sellSpread = item.sellFirstBuySecond || item.sellBinanceBuyOkx
+    
     // 过滤掉无效数据
-    const isValid = item && 
-           typeof item.buyBinanceSellOkx === 'number' && 
-           typeof item.sellBinanceBuyOkx === 'number' &&
-           !isNaN(item.buyBinanceSellOkx) && 
-           !isNaN(item.sellBinanceBuyOkx) &&
-           isFinite(item.buyBinanceSellOkx) && 
-           isFinite(item.sellBinanceBuyOkx) &&
-           item.timestamp
+    const isValid = typeof buySpread === 'number' && 
+           typeof sellSpread === 'number' &&
+           !isNaN(buySpread) && 
+           !isNaN(sellSpread) &&
+           isFinite(buySpread) && 
+           isFinite(sellSpread)
     
     if (!isValid && item) {
       console.log('发现无效数据项:', item)
@@ -1246,8 +1502,14 @@ const updateChartOption = (symbol) => {
     return
   }
   
-  const buyData = allData.map(item => [item.timestamp, item.buyBinanceSellOkx])
-  const sellData = allData.map(item => [item.timestamp, item.sellBinanceBuyOkx])
+  const buyData = allData.map(item => {
+    const buySpread = item.buyFirstSellSecond || item.buyBinanceSellOkx
+    return [item.timestamp, buySpread]
+  })
+  const sellData = allData.map(item => {
+    const sellSpread = item.sellFirstBuySecond || item.sellBinanceBuyOkx
+    return [item.timestamp, sellSpread]
+  })
   
   console.log('生成图表数据:')
   console.log('  buyData前3个:', buyData.slice(0, 3))
@@ -1281,7 +1543,7 @@ const updateChartOption = (symbol) => {
     },
     animation: false,
     legend: {
-      data: ['Binance买/OKX卖', 'Binance卖/OKX买'],
+      data: [`${getFirstExchangeLabel()}买/${getSecondExchangeLabel()}卖`, `${getFirstExchangeLabel()}卖/${getSecondExchangeLabel()}买`],
       top: 10
     },
     grid: {
@@ -1322,7 +1584,7 @@ const updateChartOption = (symbol) => {
     ],
     series: [
       {
-        name: 'Binance买/OKX卖',
+        name: `${getFirstExchangeLabel()}买/${getSecondExchangeLabel()}卖`,
         type: 'line',
         smooth: false,
         symbol: 'none',
@@ -1334,7 +1596,7 @@ const updateChartOption = (symbol) => {
         data: buyData
       },
       {
-        name: 'Binance卖/OKX买',
+        name: `${getFirstExchangeLabel()}卖/${getSecondExchangeLabel()}买`,
         type: 'line',
         smooth: false,
         symbol: 'none',

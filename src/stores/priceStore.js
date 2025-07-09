@@ -4,13 +4,14 @@ import { ref, computed, reactive, nextTick } from 'vue'
 export const usePriceStore = defineStore('price', () => {
   // 状态
   const selectedSymbols = ref([])
+  const selectedExchangePair = ref('binance-okx') // 默认选择binance-okx
   const priceData = ref({})
   const tickHistory = ref({})
   const wsConnections = ref({})
   const isConnected = ref(false)
 
   // 数据队列 - 每个交易对独立管理
-  const symbolQueues = ref({}) // { symbol: { binance: [], okx: [], matcher: setInterval, stats: {} } }
+  const symbolQueues = ref({}) // { symbol: { binance: [], okx: [], bitget: [], matcher: setInterval, stats: {} } }
   
   // 实时统计数据（从网站打开开始计算）
   const realtimeStats = ref({}) // { symbol: { maxBuyBinanceSellOkx: number, maxSellBinanceBuyOkx: number, maxNegativeSpread: number } }
@@ -21,14 +22,15 @@ export const usePriceStore = defineStore('price', () => {
     discardedMatches: 0,     // 丢弃匹配次数
     totalBinanceQueue: 0,    // Binance总队列长度
     totalOKXQueue: 0,        // OKX总队列长度
-    queueDetails: {}         // 每个交易对的队列详情 { symbol: { binance: length, okx: length } }
+    totalBitgetQueue: 0,     // Bitget总队列长度
+    queueDetails: {}         // 每个交易对的队列详情 { symbol: { binance: length, okx: length, bitget: length } }
   })
   
   // 合约大小映射 - 存储每个交易对的合约大小
   const contractSizes = ref({}) // { symbol: contractSize }
   
   // Funding Rate数据 - 存储每个交易对的资金费率信息
-  const fundingRates = ref({}) // { symbol: { binance: {...}, okx: {...}, lastUpdate: timestamp } }
+  const fundingRates = ref({}) // { symbol: { binance: {...}, okx: {...}, bitget: {...}, lastUpdate: timestamp } }
   
   // 系统配置参数 - 可动态调整
   const systemConfig = ref({
@@ -38,7 +40,7 @@ export const usePriceStore = defineStore('price', () => {
     maxQueueSize: 100,          // 队列最大容量 - 每个队列最多保留的数据点数
     historyRetentionCount: 2000, // 历史数据保留数量 - 最多保留的历史tick数
     timeMatchingMode: 'receiveTime', // 时间匹配模式: 'originalTimestamp' | 'receiveTime'
-    maxLocalTimeDiff: 500       // 最大本地时间差(ms) - 原始时间戳与本地时间的最大允许差异
+    maxLocalTimeDiff: 50       // 最大本地时间差(ms) - 原始时间戳与本地时间的最大允许差异
   })
   
   // 协程控制参数（从systemConfig获取，保持向后兼容）
@@ -60,12 +62,14 @@ export const usePriceStore = defineStore('price', () => {
         symbolQueues.value[symbol] = {
           binance: [],
           okx: [],
+          bitget: [],
           matcher: null,
           stats: {
             successfulMatches: 0,
             discardedMatches: 0,
             totalBinanceDataReceived: 0,
             totalOKXDataReceived: 0,
+            totalBitgetDataReceived: 0,
             lastMatchTime: null,
             avgTimeDiff: 0,
             matchTimeDiffs: []
@@ -81,23 +85,28 @@ export const usePriceStore = defineStore('price', () => {
   const updateQueueStats = () => {
     let totalBinance = 0
     let totalOKX = 0
+    let totalBitget = 0
     const queueDetails = {}
     
     Object.keys(symbolQueues.value).forEach(symbol => {
       const binanceLength = symbolQueues.value[symbol]?.binance?.length || 0
       const okxLength = symbolQueues.value[symbol]?.okx?.length || 0
+      const bitgetLength = symbolQueues.value[symbol]?.bitget?.length || 0
       
       totalBinance += binanceLength
       totalOKX += okxLength
+      totalBitget += bitgetLength
       
       queueDetails[symbol] = {
         binance: binanceLength,
-        okx: okxLength
+        okx: okxLength,
+        bitget: bitgetLength
       }
     })
     
     matchStats.value.totalBinanceQueue = totalBinance
     matchStats.value.totalOKXQueue = totalOKX
+    matchStats.value.totalBitgetQueue = totalBitget
     matchStats.value.queueDetails = queueDetails
   }
 
@@ -165,12 +174,14 @@ export const usePriceStore = defineStore('price', () => {
       symbolQueues.value[symbol] = {
         binance: [],
         okx: [],
+        bitget: [],
         matcher: null,
         stats: {
           successfulMatches: 0,
           discardedMatches: 0,
           totalBinanceDataReceived: 0,
           totalOKXDataReceived: 0,
+          totalBitgetDataReceived: 0,
           lastMatchTime: null,
           avgTimeDiff: 0,
           matchTimeDiffs: []
@@ -232,73 +243,80 @@ export const usePriceStore = defineStore('price', () => {
 
   // 匹配最佳数据对
   const matchBestPair = (symbol) => {
-    const binanceData = symbolQueues.value[symbol].binance || []
-    const okxData = symbolQueues.value[symbol].okx || []
+    if (!selectedExchangePair.value) return null
     
-    if (binanceData.length === 0 || okxData.length === 0) {
+    const [firstExchange, secondExchange] = selectedExchangePair.value.split('-')
+    const firstData = symbolQueues.value[symbol]?.[firstExchange] || []
+    const secondData = symbolQueues.value[symbol]?.[secondExchange] || []
+    
+    if (firstData.length === 0 || secondData.length === 0) {
       return null
     }
     
     // 获取两个队列中最新的数据（队列末尾的数据）
-    const latestBinance = binanceData[binanceData.length - 1]
-    const latestOkx = okxData[okxData.length - 1]
+    const latestFirst = firstData[firstData.length - 1]
+    const latestSecond = secondData[secondData.length - 1]
     
     // 根据配置选择使用哪个时间进行匹配
-    let binanceTime, okxTime
+    let firstTime, secondTime
     
     if (systemConfig.value.timeMatchingMode === 'originalTimestamp') {
       // 使用交易所原始时间戳
-      binanceTime = latestBinance.originalTimestamp
-      okxTime = latestOkx.originalTimestamp
+      firstTime = latestFirst.originalTimestamp
+      secondTime = latestSecond.originalTimestamp
       
       // 如果原始时间戳不可用，回退到接收时间
-      if (!binanceTime || !okxTime) {
+      if (!firstTime || !secondTime) {
         console.warn(`${symbol} 原始时间戳不可用，回退到接收时间匹配`)
-        binanceTime = latestBinance.receiveTime
-        okxTime = latestOkx.receiveTime
+        firstTime = latestFirst.receiveTime
+        secondTime = latestSecond.receiveTime
       }
     } else {
       // 使用本地接收时间（默认）
-      binanceTime = latestBinance.receiveTime
-      okxTime = latestOkx.receiveTime
+      firstTime = latestFirst.receiveTime
+      secondTime = latestSecond.receiveTime
     }
     
     // 新增：检查原始时间戳与当前本地时间的差异
     const currentLocalTime = Date.now()
     const maxLocalTimeDiff = systemConfig.value.maxLocalTimeDiff // 使用配置的阈值
     
-    // 检查Binance原始时间戳延迟
-    if (latestBinance.originalTimestamp) {
-      const binanceDelay = Math.abs(currentLocalTime - latestBinance.originalTimestamp)
-      if (binanceDelay > maxLocalTimeDiff) {
-        console.log(`❌ Binance数据过旧: ${symbol}, 原始时间戳延迟: ${binanceDelay}ms (超过${maxLocalTimeDiff}ms阈值), 放弃匹配`)
+    // 检查第一个交易所原始时间戳延迟
+    if (latestFirst.originalTimestamp) {
+      const firstDelay = Math.abs(currentLocalTime - latestFirst.originalTimestamp)
+      if (firstDelay > maxLocalTimeDiff) {
+        console.log(`❌ ${firstExchange}数据过旧: ${symbol}, 原始时间戳延迟: ${firstDelay}ms (超过${maxLocalTimeDiff}ms阈值), 放弃匹配`)
         return null
       }
     }
     
-    // 检查OKX原始时间戳延迟
-    if (latestOkx.originalTimestamp) {
-      const okxDelay = Math.abs(currentLocalTime - latestOkx.originalTimestamp)
-      if (okxDelay > maxLocalTimeDiff) {
-        console.log(`❌ OKX数据过旧: ${symbol}, 原始时间戳延迟: ${okxDelay}ms (超过${maxLocalTimeDiff}ms阈值), 放弃匹配`)
+    // 检查第二个交易所原始时间戳延迟
+    if (latestSecond.originalTimestamp) {
+      const secondDelay = Math.abs(currentLocalTime - latestSecond.originalTimestamp)
+      if (secondDelay > maxLocalTimeDiff) {
+        console.log(`❌ ${secondExchange}数据过旧: ${symbol}, 原始时间戳延迟: ${secondDelay}ms (超过${maxLocalTimeDiff}ms阈值), 放弃匹配`)
         return null
       }
     }
     
     // 检查时间差是否在允许范围内
-    const timeDiff = Math.abs(binanceTime - okxTime)
+    const timeDiff = Math.abs(firstTime - secondTime)
     
     if (timeDiff <= maxTimeDiff.value) {
       // 时间差在允许范围内，进行匹配
       const bestMatch = {
-        binance: latestBinance,
-        okx: latestOkx,
+        [firstExchange]: latestFirst,
+        [secondExchange]: latestSecond,
+        // 保持向后兼容性
+        binance: firstExchange === 'binance' ? latestFirst : secondExchange === 'binance' ? latestSecond : null,
+        okx: firstExchange === 'okx' ? latestFirst : secondExchange === 'okx' ? latestSecond : null,
+        bitget: firstExchange === 'bitget' ? latestFirst : secondExchange === 'bitget' ? latestSecond : null,
         timeDiff
       }
       
       // 🔄 新策略：匹配成功后不删除数据，保留在队列中
-      // symbolQueues.value[symbol].binance.pop()  // 不再删除
-      // symbolQueues.value[symbol].okx.pop()      // 不再删除
+      // symbolQueues.value[symbol][firstExchange].pop()  // 不再删除
+      // symbolQueues.value[symbol][secondExchange].pop()      // 不再删除
       
       // 更新全局成功匹配统计
       matchStats.value.successfulMatches++
@@ -319,8 +337,8 @@ export const usePriceStore = defineStore('price', () => {
       
       updateQueueStats()
       
-      console.log(`✅ 匹配成功: ${symbol}, 时间差: ${timeDiff}ms (${systemConfig.value.timeMatchingMode}), 数据保留在队列中, Binance队列: ${symbolQueues.value[symbol].binance.length}, OKX队列: ${symbolQueues.value[symbol].okx.length}`)
-      console.log(`   匹配时间详情: Binance(${systemConfig.value.timeMatchingMode}): ${new Date(binanceTime).toLocaleTimeString()}.${binanceTime % 1000}, OKX(${systemConfig.value.timeMatchingMode}): ${new Date(okxTime).toLocaleTimeString()}.${okxTime % 1000}`)
+      console.log(`✅ 匹配成功: ${symbol}, 时间差: ${timeDiff}ms (${systemConfig.value.timeMatchingMode}), 数据保留在队列中, ${firstExchange}队列: ${symbolQueues.value[symbol][firstExchange].length}, ${secondExchange}队列: ${symbolQueues.value[symbol][secondExchange].length}`)
+      console.log(`   匹配时间详情: ${firstExchange}(${systemConfig.value.timeMatchingMode}): ${new Date(firstTime).toLocaleTimeString()}.${firstTime % 1000}, ${secondExchange}(${systemConfig.value.timeMatchingMode}): ${new Date(secondTime).toLocaleTimeString()}.${secondTime % 1000}`)
       return bestMatch
     } else {
       // 🔄 简化：时间差太大时也不删除数据，只记录统计
@@ -330,82 +348,198 @@ export const usePriceStore = defineStore('price', () => {
       symbolQueues.value[symbol].stats.discardedMatches++
       updateQueueStats()
       
-      if (binanceTime > okxTime) {
-        console.log(`⏰ 时间差过大(${timeDiff}ms): ${symbol}, OKX数据较旧 (${systemConfig.value.timeMatchingMode}: ${new Date(okxTime).toLocaleTimeString()}), 等待更新数据`)
+      if (firstTime > secondTime) {
+        console.log(`⏰ 时间差过大(${timeDiff}ms): ${symbol}, ${secondExchange}数据较旧 (${systemConfig.value.timeMatchingMode}: ${new Date(secondTime).toLocaleTimeString()}), 等待更新数据`)
       } else {
-        console.log(`⏰ 时间差过大(${timeDiff}ms): ${symbol}, Binance数据较旧 (${systemConfig.value.timeMatchingMode}: ${new Date(binanceTime).toLocaleTimeString()}), 等待更新数据`)
+        console.log(`⏰ 时间差过大(${timeDiff}ms): ${symbol}, ${firstExchange}数据较旧 (${systemConfig.value.timeMatchingMode}: ${new Date(firstTime).toLocaleTimeString()}), 等待更新数据`)
       }
     }
     
     // 清理过期数据（使用配置的过期时间）
     const now = Date.now()
-    const originalBinanceLength = symbolQueues.value[symbol].binance.length
-    const originalOkxLength = symbolQueues.value[symbol].okx.length
+    const originalFirstLength = symbolQueues.value[symbol][firstExchange].length
+    const originalSecondLength = symbolQueues.value[symbol][secondExchange].length
     
-    symbolQueues.value[symbol].binance = binanceData.filter(item => now - item.timestamp < systemConfig.value.dataExpirationTime)
-    symbolQueues.value[symbol].okx = okxData.filter(item => now - item.timestamp < systemConfig.value.dataExpirationTime)
+    symbolQueues.value[symbol][firstExchange] = firstData.filter(item => now - item.timestamp < systemConfig.value.dataExpirationTime)
+    symbolQueues.value[symbol][secondExchange] = secondData.filter(item => now - item.timestamp < systemConfig.value.dataExpirationTime)
     
-    const cleanedBinance = originalBinanceLength - symbolQueues.value[symbol].binance.length
-    const cleanedOkx = originalOkxLength - symbolQueues.value[symbol].okx.length
+    const cleanedFirst = originalFirstLength - symbolQueues.value[symbol][firstExchange].length
+    const cleanedSecond = originalSecondLength - symbolQueues.value[symbol][secondExchange].length
     
-    if (cleanedBinance > 0 || cleanedOkx > 0) {
-      console.log(`🧹 清理过期数据: ${symbol}, Binance清理${cleanedBinance}个, OKX清理${cleanedOkx}个`)
+    if (cleanedFirst > 0 || cleanedSecond > 0) {
+      console.log(`🧹 清理过期数据: ${symbol}, ${firstExchange}清理${cleanedFirst}个, ${secondExchange}清理${cleanedSecond}个`)
     }
     
     return null
+  }
+
+  // 添加数据到Bitget队列
+  const addToBitgetQueue = (symbol, data) => {
+    console.log('=== addToBitgetQueue 被调用 ===')
+    console.log('symbol:', symbol)
+    console.log('data:', data)
+    
+    if (!symbolQueues.value[symbol]) {
+      symbolQueues.value[symbol] = {
+        binance: [],
+        okx: [],
+        bitget: [],
+        matcher: null,
+        stats: {
+          successfulMatches: 0,
+          discardedMatches: 0,
+          totalBinanceDataReceived: 0,
+          totalOKXDataReceived: 0,
+          totalBitgetDataReceived: 0,
+          lastMatchTime: null,
+          avgTimeDiff: 0,
+          matchTimeDiffs: []
+        }
+      }
+      // 为新的交易对启动独立协程
+      startSymbolMatcher(symbol)
+    }
+    
+    // 获取该交易对的合约大小，默认为1
+    const contractSize = contractSizes.value[symbol] || 1
+    
+    // Bitget数据格式类似OKX
+    const originalBidQty = parseFloat(data.bids[0][1])
+    const originalAskQty = parseFloat(data.asks[0][1])
+    
+    // 计算应用合约大小后的数量
+    const adjustedBidQty = originalBidQty * contractSize
+    const adjustedAskQty = originalAskQty * contractSize
+    
+    const queueData = {
+      symbol,
+      exchange: 'bitget',
+      bidPrice: parseFloat(data.bids[0][0]),
+      askPrice: parseFloat(data.asks[0][0]),
+      bidQty: adjustedBidQty,
+      askQty: adjustedAskQty,
+      originalTimestamp: data.ts ? parseInt(data.ts) : null, // Bitget原始时间戳
+      receiveTime: Date.now(), // 本地接收时间
+      timestamp: Date.now() // 保持向后兼容
+    }
+    
+    symbolQueues.value[symbol].bitget.push(queueData)
+    
+    // 更新统计数据
+    symbolQueues.value[symbol].stats.totalBitgetDataReceived++
+    
+    // 保持队列大小
+    if (symbolQueues.value[symbol].bitget.length > maxQueueSize.value) {
+      symbolQueues.value[symbol].bitget.shift()
+    }
+    
+    console.log(`[${symbol}] Bitget数据入队详情:`, {
+      contractSize: contractSize,
+      originalBidQty: originalBidQty,
+      originalAskQty: originalAskQty,
+      adjustedBidQty: adjustedBidQty,
+      adjustedAskQty: adjustedAskQty,
+      queueLength: symbolQueues.value[symbol].bitget.length
+    })
+    
+    // 更新队列统计
+    updateQueueStats()
+    
+    // 🔄 简化：每次新数据到达就立即尝试匹配
+    tryMatchPair(symbol)
   }
 
   // 尝试匹配数据对
   const tryMatchPair = (symbol) => {
     const match = matchBestPair(symbol)
     
-    if (match) {
-      // 更新实时价格数据
-      priceData.value[`binance_${symbol}`] = match.binance
-      priceData.value[`okx_${symbol}`] = match.okx
+    if (match && selectedExchangePair.value) {
+      const [firstExchange, secondExchange] = selectedExchangePair.value.split('-')
       
-      // 计算价差
-      const spread = calculateSpread(match.binance, match.okx)
+      // 根据选择的交易所组合动态更新价格数据
+      const firstData = match[firstExchange]
+      const secondData = match[secondExchange]
       
-      if (spread) {
-        // 更新实时统计数据
-        updateRealtimeStats(symbol, spread)
+      if (firstData && secondData) {
+        // 更新实时价格数据
+        priceData.value[`${firstExchange}_${symbol}`] = firstData
+        priceData.value[`${secondExchange}_${symbol}`] = secondData
         
-        // 保存匹配成功的完整数据作为历史记录
-        const historyData = {
-          timestamp: spread.timestamp,
-          buyBinanceSellOkx: spread.buyBinanceSellOkx,
-          sellBinanceBuyOkx: spread.sellBinanceBuyOkx,
-          timeDiff: match.timeDiff,
-          // 保存原始价格数据用于图表详细显示
-          binanceData: {
-            bidPrice: match.binance.bidPrice,
-            askPrice: match.binance.askPrice,
-            bidQty: match.binance.bidQty,
-            askQty: match.binance.askQty,
-            timestamp: match.binance.timestamp
-          },
-          okxData: {
-            bidPrice: match.okx.bidPrice,
-            askPrice: match.okx.askPrice,
-            bidQty: match.okx.bidQty,
-            askQty: match.okx.askQty,
-            timestamp: match.okx.timestamp
+        // 计算价差
+        const spread = calculateSpread(firstData, secondData)
+        
+        if (spread) {
+          // 更新实时统计数据
+          updateRealtimeStats(symbol, spread)
+          
+          // 保存匹配成功的完整数据作为历史记录
+          const historyData = {
+            timestamp: spread.timestamp,
+            buyFirstSellSecond: spread.buyFirstSellSecond,
+            sellFirstBuySecond: spread.sellFirstBuySecond,
+            // 保持向后兼容性
+            buyBinanceSellOkx: spread.buyBinanceSellOkx,
+            sellBinanceBuyOkx: spread.sellBinanceBuyOkx,
+            timeDiff: match.timeDiff,
+            // 保存原始价格数据用于图表详细显示
+            firstExchangeData: {
+              exchange: firstExchange,
+              bidPrice: firstData.bidPrice,
+              askPrice: firstData.askPrice,
+              bidQty: firstData.bidQty,
+              askQty: firstData.askQty,
+              timestamp: firstData.timestamp
+            },
+            secondExchangeData: {
+              exchange: secondExchange,
+              bidPrice: secondData.bidPrice,
+              askPrice: secondData.askPrice,
+              bidQty: secondData.bidQty,
+              askQty: secondData.askQty,
+              timestamp: secondData.timestamp
+            },
+            // 保持向后兼容性
+            binanceData: firstExchange === 'binance' ? {
+              bidPrice: firstData.bidPrice,
+              askPrice: firstData.askPrice,
+              bidQty: firstData.bidQty,
+              askQty: firstData.askQty,
+              timestamp: firstData.timestamp
+            } : secondExchange === 'binance' ? {
+              bidPrice: secondData.bidPrice,
+              askPrice: secondData.askPrice,
+              bidQty: secondData.bidQty,
+              askQty: secondData.askQty,
+              timestamp: secondData.timestamp
+            } : null,
+            okxData: firstExchange === 'okx' ? {
+              bidPrice: firstData.bidPrice,
+              askPrice: firstData.askPrice,
+              bidQty: firstData.bidQty,
+              askQty: firstData.askQty,
+              timestamp: firstData.timestamp
+            } : secondExchange === 'okx' ? {
+              bidPrice: secondData.bidPrice,
+              askPrice: secondData.askPrice,
+              bidQty: secondData.bidQty,
+              askQty: secondData.askQty,
+              timestamp: secondData.timestamp
+            } : null
           }
+          
+          // 保存历史数据
+          saveTickHistory(symbol, historyData)
+          
+          console.log(`价差计算完成: ${symbol}`, {
+            [`buy${firstExchange.charAt(0).toUpperCase() + firstExchange.slice(1)}Sell${secondExchange.charAt(0).toUpperCase() + secondExchange.slice(1)}`]: spread.buyFirstSellSecond,
+            [`sell${firstExchange.charAt(0).toUpperCase() + firstExchange.slice(1)}Buy${secondExchange.charAt(0).toUpperCase() + secondExchange.slice(1)}`]: spread.sellFirstBuySecond,
+            timeDiff: match.timeDiff,
+            [`${firstExchange}Bid`]: firstData.bidPrice,
+            [`${firstExchange}Ask`]: firstData.askPrice,
+            [`${secondExchange}Bid`]: secondData.bidPrice,
+            [`${secondExchange}Ask`]: secondData.askPrice
+          })
         }
-        
-        // 保存历史数据
-        saveTickHistory(symbol, historyData)
-        
-        console.log(`价差计算完成: ${symbol}`, {
-          buyBinanceSellOkx: spread.buyBinanceSellOkx,
-          sellBinanceBuyOkx: spread.sellBinanceBuyOkx,
-          timeDiff: match.timeDiff,
-          binanceBid: match.binance.bidPrice,
-          binanceAsk: match.binance.askPrice,
-          okxBid: match.okx.bidPrice,
-          okxAsk: match.okx.askPrice
-        })
       }
     }
   }
@@ -443,23 +577,26 @@ export const usePriceStore = defineStore('price', () => {
   }
 
   // 计算价差率
-  const calculateSpread = (binanceData, okxData) => {
-    if (!binanceData || !okxData) return null
+  const calculateSpread = (firstExchangeData, secondExchangeData) => {
+    if (!firstExchangeData || !secondExchangeData) return null
     
-    const binanceBid = binanceData.bidPrice
-    const binanceAsk = binanceData.askPrice
-    const okxBid = okxData.bidPrice
-    const okxAsk = okxData.askPrice
+    const firstBid = firstExchangeData.bidPrice
+    const firstAsk = firstExchangeData.askPrice
+    const secondBid = secondExchangeData.bidPrice
+    const secondAsk = secondExchangeData.askPrice
 
-    // Binance买OKX卖的价差率
-    const buyBinanceSellOkx = ((binanceAsk - okxBid) / okxBid * 100)
-    // Binance卖OKX买的价差率
-    const sellBinanceBuyOkx = ((okxAsk - binanceBid) / binanceBid * 100)
+    // 第一个交易所买第二个交易所卖的价差率
+    const buyFirstSellSecond = ((firstAsk - secondBid) / secondBid * 100)
+    // 第一个交易所卖第二个交易所买的价差率
+    const sellFirstBuySecond = ((secondAsk - firstBid) / firstBid * 100)
 
     return {
-      buyBinanceSellOkx: parseFloat(buyBinanceSellOkx.toFixed(6)),
-      sellBinanceBuyOkx: parseFloat(sellBinanceBuyOkx.toFixed(6)),
-      timestamp: Math.max(binanceData.timestamp, okxData.timestamp)
+      buyFirstSellSecond: parseFloat(buyFirstSellSecond.toFixed(6)),
+      sellFirstBuySecond: parseFloat(sellFirstBuySecond.toFixed(6)),
+      // 保持向后兼容性的旧属性名
+      buyBinanceSellOkx: parseFloat(buyFirstSellSecond.toFixed(6)),
+      sellBinanceBuyOkx: parseFloat(sellFirstBuySecond.toFixed(6)),
+      timestamp: Math.max(firstExchangeData.timestamp, secondExchangeData.timestamp)
     }
   }
 
@@ -469,6 +606,7 @@ export const usePriceStore = defineStore('price', () => {
       symbolQueues.value[symbol] = {
         binance: [],
         okx: [],
+        bitget: [],
         matcher: null,
         stats: {}
       }
@@ -504,6 +642,16 @@ export const usePriceStore = defineStore('price', () => {
         }
       }
       
+      if (symbolQueues.value[symbol].bitget) {
+        const originalBitgetLength = symbolQueues.value[symbol].bitget.length
+        symbolQueues.value[symbol].bitget = symbolQueues.value[symbol].bitget.filter(item => now - item.timestamp < systemConfig.value.dataExpirationTime)
+        const cleanedBitget = originalBitgetLength - symbolQueues.value[symbol].bitget.length
+        
+        if (cleanedBitget > 0) {
+          console.log(`[${symbol}] 定时清理过期Bitget数据: ${cleanedBitget}个`)
+        }
+      }
+      
       // 更新队列统计
       updateQueueStats()
       
@@ -532,6 +680,7 @@ export const usePriceStore = defineStore('price', () => {
     // 清理价格数据
     delete priceData.value[`binance_${symbol}`]
     delete priceData.value[`okx_${symbol}`]
+    delete priceData.value[`bitget_${symbol}`]
     
     // 清理历史数据
     delete tickHistory.value[symbol]
@@ -572,22 +721,30 @@ export const usePriceStore = defineStore('price', () => {
 
   // 获取格式化的价格数据
   const getFormattedPriceData = computed(() => {
+    if (!selectedExchangePair.value) return []
+    
+    const [firstExchange, secondExchange] = selectedExchangePair.value.split('-')
+    
     const result = selectedSymbols.value.map(symbol => {
-      const binanceKey = `binance_${symbol}`
-      const okxKey = `okx_${symbol}`
-      const binanceData = priceData.value[binanceKey]
-      const okxData = priceData.value[okxKey]
+      const firstKey = `${firstExchange}_${symbol}`
+      const secondKey = `${secondExchange}_${symbol}`
+      const firstData = priceData.value[firstKey]
+      const secondData = priceData.value[secondKey]
       
-      const spread = calculateSpread(binanceData, okxData)
+      const spread = calculateSpread(firstData, secondData)
       
       const rowData = {
         symbol,
-        binance: binanceData,
-        okx: okxData,
+        [firstExchange]: firstData,
+        [secondExchange]: secondData,
+        // 保持向后兼容性
+        binance: firstExchange === 'binance' ? firstData : secondExchange === 'binance' ? secondData : null,
+        okx: firstExchange === 'okx' ? firstData : secondExchange === 'okx' ? secondData : null,
+        bitget: firstExchange === 'bitget' ? firstData : secondExchange === 'bitget' ? secondData : null,
         spread,
         lastUpdate: Math.max(
-          binanceData?.timestamp || 0,
-          okxData?.timestamp || 0
+          firstData?.timestamp || 0,
+          secondData?.timestamp || 0
         )
       }
       
@@ -596,6 +753,26 @@ export const usePriceStore = defineStore('price', () => {
     
     return result
   })
+
+  // 设置选中的交易所组合
+  const setSelectedExchangePair = (exchangePair) => {
+    console.log(`切换交易所组合: ${selectedExchangePair.value} -> ${exchangePair}`)
+    selectedExchangePair.value = exchangePair
+    
+    // 断开现有连接
+    if (isConnected.value) {
+      disconnectWebSockets()
+    }
+    
+    // 清空当前选择的交易对和相关数据
+    selectedSymbols.value = []
+    priceData.value = {}
+    tickHistory.value = {}
+    realtimeStats.value = {}
+    symbolQueues.value = {}
+    
+    console.log(`交易所组合已切换到: ${exchangePair}`)
+  }
 
   // 设置选中的交易对
   const setSelectedSymbols = async (symbols) => {
@@ -667,26 +844,41 @@ export const usePriceStore = defineStore('price', () => {
     disconnectWebSockets()
     
     if (selectedSymbols.value.length === 0) return
+    if (!selectedExchangePair.value) {
+      console.warn('未选择交易所组合，无法连接WebSocket')
+      return
+    }
 
-    console.log('开始连接WebSocket，交易对:', selectedSymbols.value)
+    const [firstExchange, secondExchange] = selectedExchangePair.value.split('-')
+    console.log(`开始连接WebSocket，交易所组合: ${firstExchange} ↔ ${secondExchange}，交易对:`, selectedSymbols.value)
 
     try {
       // 初始化队列（协程已在initializeQueues中启动）
       initializeQueues()
       
-      // 并行连接Binance和OKX WebSocket
-      await Promise.all([
-        connectBinanceWS(),
-        connectOKXWS()
-      ])
+      // 根据选择的交易所组合，动态连接对应的WebSocket
+      const connectionPromises = []
+      
+      if (firstExchange === 'binance' || secondExchange === 'binance') {
+        connectionPromises.push(connectBinanceWS())
+      }
+      if (firstExchange === 'okx' || secondExchange === 'okx') {
+        connectionPromises.push(connectOKXWS())
+      }
+      if (firstExchange === 'bitget' || secondExchange === 'bitget') {
+        connectionPromises.push(connectBitgetWS())
+      }
+      
+      // 并行连接所需的WebSocket
+      await Promise.all(connectionPromises)
       
       // 启动状态检查
       startStatusCheck()
       
       isConnected.value = true
-      console.log('所有WebSocket连接完成，各交易对的独立协程已启动')
+      console.log(`${firstExchange} ↔ ${secondExchange} WebSocket连接完成，各交易对的独立协程已启动`)
     } catch (error) {
-      console.error('WebSocket连接失败:', error)
+      console.error(`${firstExchange} ↔ ${secondExchange} WebSocket连接失败:`, error)
       isConnected.value = false
       throw error
     }
@@ -840,6 +1032,47 @@ export const usePriceStore = defineStore('price', () => {
     return binanceSymbol
   }
 
+  // 将CCXT格式转换为Bitget格式
+  const convertToBitgetFormat = (ccxtSymbol) => {
+    // BTC/USDT:USDT -> BTCUSDT (v2格式，不加_UMCBL)
+    if (!ccxtSymbol || typeof ccxtSymbol !== 'string') {
+      console.warn('Invalid CCXT symbol:', ccxtSymbol)
+      return ''
+    }
+    const parts = ccxtSymbol.split('/')
+    if (parts.length !== 2) return ''
+    
+    const base = parts[0]
+    const quote = parts[1].split(':')[0]
+    return `${base}${quote}` // v2格式，不加_UMCBL后缀
+  }
+
+  // 将Bitget格式转换为CCXT格式
+  const convertFromBitgetFormat = (bitgetSymbol) => {
+    // BTCUSDT -> BTC/USDT:USDT (v2格式，不需要处理_UMCBL)
+    if (!bitgetSymbol || typeof bitgetSymbol !== 'string') {
+      console.warn('Invalid Bitget symbol:', bitgetSymbol)
+      return ''
+    }
+    
+    // 尝试手动分离常见的quote货币
+    if (bitgetSymbol.endsWith('USDT')) {
+      const base = bitgetSymbol.replace('USDT', '')
+      return `${base}/USDT:USDT`
+    }
+    
+    // 如果不是USDT结尾，尝试其他常见的quote货币
+    const commonQuotes = ['BUSD', 'BTC', 'ETH', 'BNB']
+    for (const quote of commonQuotes) {
+      if (bitgetSymbol.endsWith(quote)) {
+        const base = bitgetSymbol.replace(quote, '')
+        return `${base}/${quote}:${quote}`
+      }
+    }
+    
+    return bitgetSymbol
+  }
+
   // 连接OKX WebSocket
   const connectOKXWS = () => {
     return new Promise((resolve, reject) => {
@@ -851,7 +1084,7 @@ export const usePriceStore = defineStore('price', () => {
       ws.onopen = () => {
         console.log('OKX WebSocket连接成功')
         
-        // 订阅ticker数据，转换交易对格式
+        // 订阅bbo-tbt数据，转换交易对格式
         const subscribeMsg = {
           op: 'subscribe',
           args: selectedSymbols.value.map(ccxtSymbol => ({
@@ -943,6 +1176,110 @@ export const usePriceStore = defineStore('price', () => {
     })
   }
 
+  // 连接Bitget WebSocket
+  const connectBitgetWS = () => {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket('wss://ws.bitget.com/v2/ws/public')
+      
+      let isResolved = false
+      let isSubscribed = false
+      
+      ws.onopen = () => {
+        console.log('Bitget WebSocket连接成功')
+        
+        // 订阅orderbook数据，转换交易对格式
+        const subscribeMsg = {
+          op: 'subscribe',
+          args: selectedSymbols.value.map(ccxtSymbol => ({
+            instType: 'USDT-FUTURES',
+            channel: 'books',
+            instId: convertToBitgetFormat(ccxtSymbol)
+          }))
+        }
+        
+        console.log('Bitget订阅消息:', subscribeMsg)
+        ws.send(JSON.stringify(subscribeMsg))
+      }
+      
+      ws.onmessage = (event) => {
+        try {
+          const response = JSON.parse(event.data)
+          // console.log('Bitget WebSocket消息:', response)
+          
+          // 处理订阅确认消息
+          if (response.event) {
+            if (response.event === 'subscribe') {
+              console.log('Bitget订阅成功:', response)
+              if (!isResolved) {
+                isResolved = true
+                isSubscribed = true
+                resolve()
+              }
+            } else if (response.event === 'error') {
+              console.error('Bitget订阅错误:', response)
+              if (!isResolved) {
+                isResolved = true
+                reject(new Error(`Bitget订阅失败: ${response.msg}`))
+              }
+            }
+            return
+          }
+          
+          // 处理数据消息
+          if (response.arg && response.data && Array.isArray(response.data)) {
+            const instId = response.arg.instId
+            
+            response.data.forEach(item => {
+              if (!item.bids || !item.asks || item.bids.length === 0 || item.asks.length === 0) {
+                console.warn('Bitget数据不完整:', item)
+                return
+              }
+              
+              const ccxtSymbol = convertFromBitgetFormat(instId)
+              
+              if (!ccxtSymbol) {
+                console.warn('无法转换Bitget交易对格式:', instId)
+                return
+              }
+              
+              console.log(`Bitget数据接收: ${ccxtSymbol}, 买一: ${item.bids[0][0]}, 卖一: ${item.asks[0][0]}, 原始时间戳: ${item.ts || 'N/A'}`)
+              
+              // 添加到Bitget队列
+              addToBitgetQueue(ccxtSymbol, item)
+            })
+          }
+        } catch (error) {
+          console.error('Bitget数据解析错误:', error)
+        }
+      }
+      
+      ws.onerror = (error) => {
+        console.error('Bitget WebSocket错误:', error)
+        if (!isResolved) {
+          isResolved = true
+          reject(error)
+        }
+      }
+      
+      ws.onclose = (event) => {
+        console.log(`Bitget WebSocket断开, 代码: ${event.code}`)
+        if (event.code !== 1000) {
+          isConnected.value = false
+        }
+      }
+      
+      wsConnections.value.bitget = ws
+      
+      // 设置连接超时
+      setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true
+          reject(new Error('Bitget WebSocket连接超时'))
+        }
+      }, 10000)
+    })
+  }
+
   // 保存tick历史数据
   const saveTickHistory = (symbol, historyData) => {
     if (!tickHistory.value[symbol]) {
@@ -1003,6 +1340,7 @@ export const usePriceStore = defineStore('price', () => {
       discardedMatches: 0,
       totalBinanceQueue: 0,
       totalOKXQueue: 0,
+      totalBitgetQueue: 0,
       queueDetails: {}
     }
     
@@ -1028,6 +1366,11 @@ export const usePriceStore = defineStore('price', () => {
       wsConnections.value.okx.close()
     }
     
+    // 断开Bitget连接
+    if (wsConnections.value.bitget && wsConnections.value.bitget.readyState === WebSocket.OPEN) {
+      wsConnections.value.bitget.close()
+    }
+    
     wsConnections.value = {}
     isConnected.value = false
     console.log('所有WebSocket连接已断开，所有队列和协程已清空，实时统计数据已重置')
@@ -1040,29 +1383,49 @@ export const usePriceStore = defineStore('price', () => {
 
   // 检查WebSocket连接状态
   const checkConnectionStatus = () => {
-    let binanceConnected = false
-    let okxConnected = false
+    if (!selectedExchangePair.value) {
+      isConnected.value = false
+      return false
+    }
     
-    // 检查Binance连接
-    if (wsConnections.value.binance) {
-      if (typeof wsConnections.value.binance === 'object') {
-        binanceConnected = Object.values(wsConnections.value.binance).some(ws => 
+    const [firstExchange, secondExchange] = selectedExchangePair.value.split('-')
+    let firstConnected = false
+    let secondConnected = false
+    
+    // 检查第一个交易所连接
+    if (wsConnections.value[firstExchange]) {
+      if (typeof wsConnections.value[firstExchange] === 'object' && !wsConnections.value[firstExchange].readyState) {
+        // 多个连接的情况（如Binance）
+        firstConnected = Object.values(wsConnections.value[firstExchange]).some(ws => 
           ws && ws.readyState === WebSocket.OPEN
         )
       } else {
-        binanceConnected = wsConnections.value.binance.readyState === WebSocket.OPEN
+        // 单个连接的情况（如OKX、Bitget）
+        firstConnected = wsConnections.value[firstExchange].readyState === WebSocket.OPEN
       }
     }
     
-    // 检查OKX连接
-    if (wsConnections.value.okx) {
-      okxConnected = wsConnections.value.okx.readyState === WebSocket.OPEN
+    // 检查第二个交易所连接
+    if (wsConnections.value[secondExchange]) {
+      if (typeof wsConnections.value[secondExchange] === 'object' && !wsConnections.value[secondExchange].readyState) {
+        // 多个连接的情况（如Binance）
+        secondConnected = Object.values(wsConnections.value[secondExchange]).some(ws => 
+          ws && ws.readyState === WebSocket.OPEN
+        )
+      } else {
+        // 单个连接的情况（如OKX、Bitget）
+        secondConnected = wsConnections.value[secondExchange].readyState === WebSocket.OPEN
+      }
     }
     
-    const newStatus = binanceConnected && okxConnected
+    const newStatus = firstConnected && secondConnected
     if (isConnected.value !== newStatus) {
       isConnected.value = newStatus
-      console.log('连接状态变化:', { binanceConnected, okxConnected, overall: newStatus })
+      console.log('连接状态变化:', { 
+        [`${firstExchange}Connected`]: firstConnected, 
+        [`${secondExchange}Connected`]: secondConnected, 
+        overall: newStatus 
+      })
     }
     
     return newStatus
@@ -1550,27 +1913,83 @@ export const usePriceStore = defineStore('price', () => {
     }
   }
   
+  // 获取Bitget Funding Rate（增强版，包含周期计算）
+  const fetchBitgetFundingRate = async (symbol) => {
+    try {
+      const bitgetSymbol = convertToBitgetFormat(symbol)
+      if (!bitgetSymbol) {
+        throw new Error(`无法转换Bitget交易对格式: ${symbol}`)
+      }
+      
+      // 尝试多个可能的API端点
+      let currentData = null
+      let historyData = []
+      
+      try {
+        const v2Response = await fetch(`https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${bitgetSymbol}&productType=usdt-futures`)
+        const v2Data = await v2Response.json()
+        
+        if (v2Data.code === '00000') {
+          currentData = v2Data
+        } else {
+          throw new Error(`Bitget API错误: ${v2Data.msg || 'API调用失败'}`)
+        }
+      } catch (apiError) {
+        console.error(`Bitget API调用失败:`, apiError)
+        return null
+      }
+      
+      
+      if (!currentData || !currentData.data) {
+        throw new Error('Bitget API返回空数据')
+      }
+      
+      const fundingData = currentData.data[0]
+      console.log('Bitget资金费率数据:', fundingData)
+      
+      // Bitget API字段映射
+      const fundingRate = parseFloat(fundingData.fundingRate || fundingData.rate || 0)
+      const nextSettleTime = parseInt(fundingData.nextUpdate || fundingData.nextSettleTime || fundingData.nextFundingTime || fundingData.fundingTime || Date.now() + 8 * 60 * 60 * 1000)
+      
+      return {
+        symbol: bitgetSymbol,
+        fundingRate: fundingRate,
+        nextFundingTime: nextSettleTime,
+        fundingCountdown: nextSettleTime - Date.now(),
+        period: fundingData.fundingRateInterval, // 周期（小时）
+        historyData: [] // 保存历史数据以备用
+      }
+    } catch (error) {
+      console.error(`获取Bitget Funding Rate失败 ${symbol}:`, error)
+      return null
+    }
+  }
+
   // 获取单个交易对的Funding Rate
   const fetchFundingRateForSymbol = async (symbol) => {
     console.log(`开始获取 ${symbol} 的Funding Rate...`)
     
-    const [binanceData, okxData] = await Promise.all([
+    const [binanceData, okxData, bitgetData] = await Promise.all([
       fetchBinanceFundingRate(symbol),
-      fetchOKXFundingRate(symbol)
+      fetchOKXFundingRate(symbol),
+      fetchBitgetFundingRate(symbol)
     ])
     
-    if (binanceData || okxData) {
+    if (binanceData || okxData || bitgetData) {
       fundingRates.value[symbol] = {
         binance: binanceData,
         okx: okxData,
+        bitget: bitgetData,
         lastUpdate: Date.now()
       }
       
       console.log(`${symbol} Funding Rate获取完成:`, {
         binance: binanceData?.fundingRate,
         okx: okxData?.fundingRate,
+        bitget: bitgetData?.fundingRate,
         binanceNext: binanceData?.nextFundingTime ? new Date(binanceData.nextFundingTime).toLocaleString() : 'N/A',
-        okxNext: okxData?.nextFundingTime ? new Date(okxData.nextFundingTime).toLocaleString() : 'N/A'
+        okxNext: okxData?.nextFundingTime ? new Date(okxData.nextFundingTime).toLocaleString() : 'N/A',
+        bitgetNext: bitgetData?.nextFundingTime ? new Date(bitgetData.nextFundingTime).toLocaleString() : 'N/A'
       })
     }
   }
@@ -1634,6 +2053,7 @@ export const usePriceStore = defineStore('price', () => {
 
   return {
     selectedSymbols,
+    selectedExchangePair,
     availableSymbols,
     priceData,
     isConnected,
@@ -1641,6 +2061,7 @@ export const usePriceStore = defineStore('price', () => {
     symbolQueues,
     fundingRates,
     getFormattedPriceData,
+    setSelectedExchangePair,
     setSelectedSymbols,
     connectWebSockets,
     disconnectWebSockets,
@@ -1666,7 +2087,13 @@ export const usePriceStore = defineStore('price', () => {
     checkContractSizes,
     addToBinanceQueue,
     addToOKXQueue,
+    addToBitgetQueue,
     convertToBinanceFormat,
+    convertToOKXFormat,
+    convertFromOKXFormat,
+    convertFromBinanceFormat,
+    convertToBitgetFormat,
+    convertFromBitgetFormat,
     clearSymbolData,
     getSystemConfig,
     updateSystemConfig,
@@ -1677,6 +2104,7 @@ export const usePriceStore = defineStore('price', () => {
     safeUpdateSystemConfig,
     fetchFundingRateForSymbol,
     fetchAllFundingRates,
+    fetchBitgetFundingRate,
     formatFundingRate,
     formatFundingRatePeriod,
     formatNextFundingTime,
