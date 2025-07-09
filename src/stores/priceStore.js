@@ -875,6 +875,9 @@ export const usePriceStore = defineStore('price', () => {
       // 启动状态检查
       startStatusCheck()
       
+      // 启动资金费率定时更新
+      startFundingRateUpdates()
+      
       isConnected.value = true
       console.log(`${firstExchange} ↔ ${secondExchange} WebSocket连接完成，各交易对的独立协程已启动`)
     } catch (error) {
@@ -1327,6 +1330,9 @@ export const usePriceStore = defineStore('price', () => {
     
     // 停止状态检查
     stopStatusCheck()
+    
+    // 停止资金费率定时更新
+    stopFundingRateUpdates()
     
     // 清空所有队列和协程
     symbolQueues.value = {}
@@ -2003,6 +2009,37 @@ export const usePriceStore = defineStore('price', () => {
     
     console.log('所有Funding Rate获取完成')
   }
+
+  // 定时更新资金费率
+  let fundingRateUpdateInterval = null
+  const startFundingRateUpdates = () => {
+    if (fundingRateUpdateInterval) {
+      clearInterval(fundingRateUpdateInterval)
+    }
+    
+    // 立即获取一次
+    if (selectedSymbols.value.length > 0) {
+      fetchAllFundingRates()
+    }
+    
+    // 每10分钟更新一次资金费率
+    fundingRateUpdateInterval = setInterval(() => {
+      if (selectedSymbols.value.length > 0) {
+        console.log('定时更新资金费率...')
+        fetchAllFundingRates()
+      }
+    }, 10 * 60 * 1000) // 10分钟
+    
+    console.log('资金费率定时更新已启动 (每10分钟)')
+  }
+
+  const stopFundingRateUpdates = () => {
+    if (fundingRateUpdateInterval) {
+      clearInterval(fundingRateUpdateInterval)
+      fundingRateUpdateInterval = null
+      console.log('资金费率定时更新已停止')
+    }
+  }
   
   // 格式化Funding Rate显示
   const formatFundingRate = (rate) => {
@@ -2105,6 +2142,8 @@ export const usePriceStore = defineStore('price', () => {
     fetchFundingRateForSymbol,
     fetchAllFundingRates,
     fetchBitgetFundingRate,
+    startFundingRateUpdates,
+    stopFundingRateUpdates,
     formatFundingRate,
     formatFundingRatePeriod,
     formatNextFundingTime,

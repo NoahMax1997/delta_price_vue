@@ -1,6 +1,6 @@
-# OKX & Binance 价差监控系统
+# OKX & Binance & Bitget 价差监控系统
 
-一个基于Vue3的实时价差监控系统，用于监控OKX和Binance交易所之间的价格差异。
+一个基于Vue3的实时价差监控系统，用于监控OKX和Binance,Bitget交易所之间的价格差异。
 
 ## 功能特性
 
@@ -115,6 +115,7 @@ pkill -f node
 ## 界面展示
 ![主页展示 ](./example_image/主页.png)
 ![详情页展示 ](./example_image/详情页.png)
+![配置页展示 ](./example_image/配置页.png)
 
 ## 打赏地址 哈哈和别人一样也写一个
 - solana 4HLYN6b3fUAQwJnvz73DknV3MCBHkmomP1WK1TMcbPZC
